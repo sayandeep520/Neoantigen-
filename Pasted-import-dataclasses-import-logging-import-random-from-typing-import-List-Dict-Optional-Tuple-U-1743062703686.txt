@@ -1,0 +1,408 @@
+import dataclasses
+import logging
+import random
+from typing import List, Dict, Optional, Tuple, Union
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from sklearn.preprocessing import StandardScaler
+
+class NeoantigenEnvironment:
+    """
+    Simulated environment for neoantigen prediction reinforcement learning
+    """
+    def __init__(self, initial_mutations):
+        """
+        Initialize the environment with initial mutation data
+        
+        Args:
+            initial_mutations: Initial set of mutations to explore
+        """
+        self.mutations = initial_mutations
+        self.current_state = None
+        self.episode_steps = 0
+        self.max_steps = 100
+        
+        # Reward configuration
+        self.reward_weights = {
+            'mhc_binding': 0.4,
+            'immunogenicity': 0.3,
+            'tcr_recognition': 0.3
+        }
+    
+    def reset(self):
+        """
+        Reset the environment to initial state
+        
+        Returns:
+            Initial state representation
+        """
+        self.episode_steps = 0
+        # Randomly select an initial mutation
+        self.current_state = random.choice(self.mutations)
+        return self._state_to_vector(self.current_state)
+    
+    def step(self, action):
+        """
+        Take a step in the environment based on the agent's action
+        
+        Args:
+            action: Action taken by the agent
+        
+        Returns:
+            next_state, reward, done, info
+        """
+        self.episode_steps += 1
+        
+        # Simulate mutation modification based on action
+        modified_mutation = self._apply_action(self.current_state, action)
+        
+        # Calculate reward based on mutation quality
+        reward = self._calculate_reward(modified_mutation)
+        
+        # Update current state
+        self.current_state = modified_mutation
+        
+        # Check if episode is done
+        done = (self.episode_steps >= self.max_steps)
+        
+        return (
+            self._state_to_vector(modified_mutation), 
+            reward, 
+            done, 
+            {}
+        )
+    
+    def _state_to_vector(self, mutation):
+        """
+        Convert mutation to numerical vector
+        
+        Args:
+            mutation: Mutation dictionary
+        
+        Returns:
+            Numerical representation of mutation
+        """
+        # Extract key features
+        features = [
+            len(mutation.get('gene', '')),
+            len(mutation.get('protein_change', '')),
+            hash(mutation.get('mutation_type', '')) % 1000,
+            # Add more meaningful features
+        ]
+        return torch.tensor(features, dtype=torch.float32)
+    
+    def _apply_action(self, mutation, action):
+        """
+        Apply an action to modify the mutation
+        
+        Args:
+            mutation: Current mutation
+            action: Action to apply
+        
+        Returns:
+            Modified mutation
+        """
+        # Deep copy to avoid modifying original
+        modified = mutation.copy()
+        
+        # Simulate different action types
+        if action == 0:  # Minimal change
+            modified['protein_change'] = self._minimal_mutation_change(mutation['protein_change'])
+        elif action == 1:  # Moderate change
+            modified['gene'] = self._generate_similar_gene_name(mutation['gene'])
+        elif action == 2:  # Significant change
+            modified['mutation_type'] = self._mutate_mutation_type(mutation['mutation_type'])
+        
+        return modified
+    
+    def _calculate_reward(self, mutation):
+        """
+        Calculate reward based on mutation characteristics
+        
+        Args:
+            mutation: Mutation to evaluate
+        
+        Returns:
+            Calculated reward
+        """
+        # Simulate scoring components
+        mhc_binding = random.uniform(0, 1)  # In real scenario, use actual prediction
+        immunogenicity = random.uniform(0, 1)
+        tcr_recognition = random.uniform(0, 1)
+        
+        # Weighted reward calculation
+        reward = (
+            self.reward_weights['mhc_binding'] * mhc_binding +
+            self.reward_weights['immunogenicity'] * immunogenicity +
+            self.reward_weights['tcr_recognition'] * tcr_recognition
+        )
+        
+        return reward
+    
+    def _minimal_mutation_change(self, protein_change):
+        """
+        Generate a minimally different protein change
+        
+        Args:
+            protein_change: Original protein change
+        
+        Returns:
+            Modified protein change
+        """
+        # Simple mutation modification logic
+        if len(protein_change) > 2:
+            pos = random.randint(0, len(protein_change) - 1)
+            return protein_change[:pos] + random.choice('ACDEFGHIKLMNPQRSTVWY') + protein_change[pos+1:]
+        return protein_change
+    
+    def _generate_similar_gene_name(self, gene):
+        """
+        Generate a similar gene name
+        
+        Args:
+            gene: Original gene name
+        
+        Returns:
+            Modified gene name
+        """
+        # Simple gene name modification
+        suffix = random.choice(['A', 'B', 'C', 'X', 'Y'])
+        return f"{gene}{suffix}"
+    
+    def _mutate_mutation_type(self, mutation_type):
+        """
+        Modify mutation type
+        
+        Args:
+            mutation_type: Original mutation type
+        
+        Returns:
+            Modified mutation type
+        """
+        mutation_types = ['missense', 'nonsense', 'frameshift', 'silent']
+        return random.choice([t for t in mutation_types if t != mutation_type])
+
+class DeepQLearningAgent(nn.Module):
+    """
+    Deep Q-Learning Neural Network for Neoantigen Prediction
+    """
+    def __init__(self, state_dim, action_dim, hidden_dim=64):
+        """
+        Initialize the Deep Q-Network
+        
+        Args:
+            state_dim: Dimension of the state space
+            action_dim: Number of possible actions
+            hidden_dim: Number of neurons in hidden layers
+        """
+        super().__init__()
+        
+        # Neural network architecture
+        self.network = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, action_dim)
+        )
+        
+        # Optimizer and loss function
+        self.optimizer = optim.Adam(self.parameters(), lr=0.001)
+        self.loss_fn = nn.MSELoss()
+    
+    def forward(self, state):
+        """
+        Forward pass through the network
+        
+        Args:
+            state: Input state
+        
+        Returns:
+            Q-values for each action
+        """
+        return self.network(state)
+
+class NeoantigenRLTrainer:
+    """
+    Reinforcement Learning Trainer for Neoantigen Prediction
+    """
+    def __init__(
+        self, 
+        state_dim, 
+        action_dim, 
+        initial_mutations,
+        epsilon_start=1.0,
+        epsilon_end=0.01,
+        epsilon_decay=0.995
+    ):
+        """
+        Initialize the RL trainer
+        
+        Args:
+            state_dim: Dimension of the state space
+            action_dim: Number of possible actions
+            initial_mutations: Initial set of mutations
+            epsilon_start: Initial exploration rate
+            epsilon_end: Minimum exploration rate
+            epsilon_decay: Exploration rate decay
+        """
+        # Environment and agent setup
+        self.env = NeoantigenEnvironment(initial_mutations)
+        self.agent = DeepQLearningAgent(state_dim, action_dim)
+        
+        # Experience replay buffer
+        self.replay_buffer = []
+        self.buffer_size = 10000
+        self.batch_size = 64
+        
+        # Learning parameters
+        self.gamma = 0.99  # Discount factor
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+    
+    def train(self, num_episodes=1000):
+        """
+        Train the agent using Deep Q-Learning
+        
+        Args:
+            num_episodes: Number of training episodes
+        
+        Returns:
+            Training history
+        """
+        episode_rewards = []
+        
+        for episode in range(num_episodes):
+            state = self.env.reset()
+            total_reward = 0
+            done = False
+            
+            while not done:
+                # Epsilon-greedy action selection
+                if random.random() < self.epsilon:
+                    action = random.randint(0, 2)  # Random action
+                else:
+                    with torch.no_grad():
+                        q_values = self.agent(state)
+                        action = q_values.argmax().item()
+                
+                # Take action in environment
+                next_state, reward, done, _ = self.env.step(action)
+                
+                # Store experience in replay buffer
+                self._store_experience(state, action, reward, next_state, done)
+                
+                # Update state and total reward
+                state = next_state
+                total_reward += reward
+            
+            # Perform experience replay
+            self._experience_replay()
+            
+            # Decay exploration rate
+            self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+            
+            # Record episode performance
+            episode_rewards.append(total_reward)
+            
+            # Periodic reporting
+            if episode % 50 == 0:
+                print(f"Episode {episode}: Total Reward = {total_reward}, Epsilon = {self.epsilon:.4f}")
+        
+        return episode_rewards
+    
+    def _store_experience(self, state, action, reward, next_state, done):
+        """
+        Store experience in replay buffer
+        
+        Args:
+            state: Current state
+            action: Taken action
+            reward: Received reward
+            next_state: Next state
+            done: Episode termination flag
+        """
+        experience = (state, action, reward, next_state, done)
+        
+        # Manage buffer size
+        if len(self.replay_buffer) >= self.buffer_size:
+            self.replay_buffer.pop(0)
+        
+        self.replay_buffer.append(experience)
+    
+    def _experience_replay(self):
+        """
+        Perform experience replay for learning
+        """
+        # Check if enough experiences are available
+        if len(self.replay_buffer) < self.batch_size:
+            return
+        
+        # Sample batch of experiences
+        batch = random.sample(self.replay_buffer, self.batch_size)
+        
+        # Prepare batch tensors
+        states = torch.stack([exp[0] for exp in batch])
+        actions = torch.tensor([exp[1] for exp in batch])
+        rewards = torch.tensor([exp[2] for exp in batch], dtype=torch.float32)
+        next_states = torch.stack([exp[3] for exp in batch])
+        dones = torch.tensor([exp[4] for exp in batch], dtype=torch.float32)
+        
+        # Compute current Q-values
+        current_q_values = self.agent(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        
+        # Compute target Q-values
+        with torch.no_grad():
+            next_q_values = self.agent(next_states).max(1)[0]
+            target_q_values = rewards + (self.gamma * next_q_values * (1 - dones))
+        
+        # Compute loss and update network
+        loss = self.loss_fn(current_q_values, target_q_values)
+        
+        self.agent.optimizer.zero_grad()
+        loss.backward()
+        self.agent.optimizer.step()
+
+def main():
+    # Sample initial mutations
+    initial_mutations = [
+        {
+            'gene': 'KRAS',
+            'protein_change': 'G12D',
+            'mutation_type': 'missense'
+        },
+        {
+            'gene': 'TP53',
+            'protein_change': 'R273H',
+            'mutation_type': 'missense'
+        }
+    ]
+    
+    # Setup and train RL agent
+    state_dim = 3  # From _state_to_vector method
+    action_dim = 3  # Mutation modification actions
+    
+    rl_trainer = NeoantigenRLTrainer(
+        state_dim, 
+        action_dim, 
+        initial_mutations
+    )
+    
+    # Train the agent
+    rewards = rl_trainer.train(num_episodes=500)
+    
+    # Optional: Visualization or further analysis
+    import matplotlib.pyplot as plt
+    plt.plot(rewards)
+    plt.title('Neoantigen Prediction RL Training')
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.show()
+
+if __name__ == "__main__":
+    main()

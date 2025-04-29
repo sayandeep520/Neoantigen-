@@ -1,0 +1,326 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import random
+from typing import List, Dict, Any, Tuple
+
+class AttentionLayer(nn.Module):
+    """
+    Multi-head attention layer for capturing complex feature interactions
+    """
+    def __init__(self, input_dim, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = input_dim // num_heads
+        
+        # Ensure divisibility
+        assert self.head_dim * num_heads == input_dim, "Input dimension must be divisible by num_heads"
+        
+        # Linear projections for query, key, value
+        self.query_linear = nn.Linear(input_dim, input_dim)
+        self.key_linear = nn.Linear(input_dim, input_dim)
+        self.value_linear = nn.Linear(input_dim, input_dim)
+        
+        # Output projection
+        self.output_linear = nn.Linear(input_dim, input_dim)
+        
+        # Layer normalization
+        self.layer_norm = nn.LayerNorm(input_dim)
+    
+    def forward(self, x):
+        batch_size, seq_length, input_dim = x.size()
+        
+        # Linear projections
+        query = self.query_linear(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
+        key = self.key_linear(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
+        value = self.value_linear(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
+        
+        # Transpose for multi-head attention
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        
+        # Compute attention scores
+        attention_scores = torch.matmul(query, key.transpose(-2, -1)) / np.sqrt(self.head_dim)
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        
+        # Apply attention
+        context = torch.matmul(attention_probs, value)
+        
+        # Reshape and project
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_length, input_dim)
+        output = self.output_linear(context)
+        
+        # Residual connection and layer normalization
+        return self.layer_norm(output + x)
+
+class AdvancedCrisprRLNetwork(nn.Module):
+    """
+    Advanced neural network for CRISPR guide RNA optimization
+    using complex architecture and attention mechanisms
+    """
+    def __init__(self, 
+                 state_size=50, 
+                 action_size=10, 
+                 hidden_layers=[128, 64],
+                 num_attention_layers=2):
+        super().__init__()
+        
+        # Initial feature extraction
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(state_size, hidden_layers[0]),
+            nn.BatchNorm1d(hidden_layers[0]),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
+        
+        # Attention layers for feature interaction
+        self.attention_layers = nn.ModuleList([
+            AttentionLayer(hidden_layers[0]) 
+            for _ in range(num_attention_layers)
+        ])
+        
+        # Intermediate layers
+        self.hidden_layers = nn.ModuleList()
+        for i in range(1, len(hidden_layers)):
+            layer = nn.Sequential(
+                nn.Linear(hidden_layers[i-1], hidden_layers[i]),
+                nn.BatchNorm1d(hidden_layers[i]),
+                nn.ReLU(),
+                nn.Dropout(0.2)
+            )
+            self.hidden_layers.append(layer)
+        
+        # Final output layer
+        self.output_layer = nn.Linear(hidden_layers[-1], action_size)
+        
+        # Uncertainty estimation
+        self.uncertainty_layer = nn.Linear(hidden_layers[-1], action_size)
+    
+    def forward(self, x):
+        # Ensure input is 2D
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        
+        # Feature extraction
+        x = self.feature_extractor(x)
+        
+        # Reshape for attention layers
+        x_attention = x.unsqueeze(1)
+        
+        # Apply attention layers
+        for attention_layer in self.attention_layers:
+            x_attention = attention_layer(x_attention)
+        
+        # Flatten attention output
+        x = x_attention.squeeze(1)
+        
+        # Intermediate layers
+        for layer in self.hidden_layers:
+            x = layer(x)
+        
+        # Q-value and uncertainty outputs
+        q_values = self.output_layer(x)
+        uncertainties = torch.abs(self.uncertainty_layer(x))
+        
+        return q_values, uncertainties
+
+class AdvancedExplorationStrategy:
+    """
+    Sophisticated exploration strategy with adaptive noise and uncertainty-guided exploration
+    """
+    def __init__(self, 
+                 action_size=10, 
+                 initial_temperature=1.0, 
+                 min_temperature=0.1,
+                 temperature_decay=0.99):
+        self.action_size = action_size
+        self.temperature = initial_temperature
+        self.min_temperature = min_temperature
+        self.temperature_decay = temperature_decay
+        
+        # Exploration statistics
+        self.action_counts = np.zeros(action_size)
+        self.action_rewards = np.zeros(action_size)
+    
+    def select_action(self, 
+                      q_values: torch.Tensor, 
+                      uncertainties: torch.Tensor) -> int:
+        """
+        Advanced action selection with uncertainty and temperature-based exploration
+        
+        Args:
+            q_values: Predicted Q-values
+            uncertainties: Predicted uncertainties for each action
+        
+        Returns:
+            Selected action index
+        """
+        # Convert to numpy for easier manipulation
+        q_values_np = q_values.detach().numpy()
+        uncertainties_np = uncertainties.detach().numpy()
+        
+        # Combine Q-values with uncertainty bonus
+        # Uncertain actions get a boost to encourage exploration
+        exploration_bonus = uncertainties_np * self.temperature
+        adjusted_q_values = q_values_np + exploration_bonus
+        
+        # Softmax with temperature scaling
+        scaled_q_values = adjusted_q_values / self.temperature
+        probabilities = F.softmax(torch.tensor(scaled_q_values), dim=0).numpy()
+        
+        # Preferential exploration of less-explored actions
+        action_exploration_bias = 1.0 / (np.sqrt(self.action_counts + 1))
+        modified_probabilities = probabilities * action_exploration_bias
+        modified_probabilities /= modified_probabilities.sum()
+        
+        # Select action
+        action = np.random.choice(self.action_size, p=modified_probabilities)
+        
+        # Update exploration statistics
+        self.action_counts[action] += 1
+        
+        # Decay temperature
+        self.temperature = max(self.min_temperature, 
+                               self.temperature * self.temperature_decay)
+        
+        return action
+    
+    def update_action_reward(self, action: int, reward: float):
+        """
+        Update action-specific reward statistics
+        
+        Args:
+            action: Action index
+            reward: Reward received
+        """
+        # Exponential moving average of rewards
+        alpha = 0.1  # Learning rate for reward tracking
+        self.action_rewards[action] = (
+            (1 - alpha) * self.action_rewards[action] + 
+            alpha * reward
+        )
+
+class ReinforcementLearningCrisprDesigner:
+    def __init__(self, 
+                 state_size=50, 
+                 action_size=10, 
+                 learning_rate=0.001):
+        # Neural network
+        self.q_network = AdvancedCrisprRLNetwork(
+            state_size=state_size, 
+            action_size=action_size
+        )
+        self.target_network = AdvancedCrisprRLNetwork(
+            state_size=state_size, 
+            action_size=action_size
+        )
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        
+        # Optimizer with adaptive learning rate
+        self.optimizer = optim.AdamW(
+            self.q_network.parameters(), 
+            lr=learning_rate,
+            weight_decay=1e-5  # L2 regularization
+        )
+        
+        # Advanced exploration strategy
+        self.exploration_strategy = AdvancedExplorationStrategy(
+            action_size=action_size
+        )
+        
+        # Training parameters
+        self.gamma = 0.99  # Discount factor
+        self.tau = 0.005   # Soft update coefficient
+        self.batch_size = 64
+        
+        # Experience replay with prioritized sampling
+        self.replay_buffer = []
+        self.max_buffer_size = 10000
+        
+    def select_action(self, state: torch.Tensor) -> int:
+        """
+        Select an action using advanced exploration strategy
+        
+        Args:
+            state: Current state representation
+        
+        Returns:
+            Selected action index
+        """
+        with torch.no_grad():
+            q_values, uncertainties = self.q_network(state)
+            return self.exploration_strategy.select_action(q_values, uncertainties)
+    
+    def train(self, experiences: List[Tuple]):
+        """
+        Advanced training method with prioritized experience replay
+        
+        Args:
+            experiences: List of (state, action, reward, next_state) tuples
+        """
+        # Prepare batch data
+        states, actions, rewards, next_states = zip(*experiences)
+        
+        # Convert to tensors
+        states = torch.stack(states)
+        actions = torch.tensor(actions)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        next_states = torch.stack(next_states)
+        
+        # Compute current Q-values
+        current_q_values, _ = self.q_network(states)
+        current_q_values = current_q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
+        
+        # Compute target Q-values
+        with torch.no_grad():
+            next_q_values, next_uncertainties = self.target_network(next_states)
+            
+            # Double DQN: use main network to select action, target network to evaluate
+            next_actions = next_q_values.argmax(1)
+            next_target_q_values = next_q_values.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            
+            expected_q_values = rewards + self.gamma * next_target_q_values
+        
+        # Compute loss with uncertainty-weighted component
+        loss = F.smooth_l1_loss(current_q_values, expected_q_values)
+        
+        # Optimize
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        self.optimizer.step()
+        
+        # Soft update of target network
+        for target_param, local_param in zip(
+            self.target_network.parameters(), 
+            self.q_network.parameters()
+        ):
+            target_param.data.copy_(
+                self.tau * local_param.data + (1.0 - self.tau) * target_param.data
+            )
+
+# Optional: Add custom loss functions or advanced training techniques
+def uncertainty_weighted_loss(predicted, target, uncertainties):
+    """
+    Custom loss function that incorporates prediction uncertainty
+    
+    Args:
+        predicted: Predicted values
+        target: Target values
+        uncertainties: Predicted uncertainties
+    
+    Returns:
+        Weighted loss
+    """
+    # Basic loss
+    base_loss = F.smooth_l1_loss(predicted, target, reduction='none')
+    
+    # Weight loss by inverse of uncertainty
+    # More certain predictions have higher weight
+    uncertainty_weights = 1.0 / (uncertainties + 1e-6)
+    weighted_loss = base_loss * uncertainty_weights
+    
+    return weighted_loss.mean()

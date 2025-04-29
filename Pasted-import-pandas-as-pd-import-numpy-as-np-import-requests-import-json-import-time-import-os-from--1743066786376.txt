@@ -1,0 +1,86 @@
+import pandas as pd
+import numpy as np
+import requests
+import json
+import time
+import os
+from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+from Bio.Seq import Seq
+from Bio.SeqUtils import gc_fraction  # Use gc_fraction instead of GC
+import sqlite3
+import streamlit as st
+import base64
+from io import BytesIO, StringIO
+
+class RealtimeCRISPRMonitor:
+    # ... (rest of the code remains the same)
+
+    def integrate_with_crispr_target_model(self, experiment_data, model=None):
+        """
+        Integrate experimental data with the CRISPR target prediction model.
+        
+        Args:
+            experiment_data (dict): Experimental data from analyze_experiment()
+            model: Optional CRISPR target model instance
+            
+        Returns:
+            dict: Integration results with model predictions
+        """
+        try:
+            if not experiment_data:
+                return {}
+                
+            # Import the CRISPR model if not provided
+            if model is None:
+                from models.crispr_model import CRISPRTargetModel
+                model = CRISPRTargetModel()
+            
+            # Extract gRNA sequences from experiment data
+            grna_sequences = []
+            
+            # Try to get sequences from efficiency data
+            if experiment_data.get("efficiency_data"):
+                for item in experiment_data["efficiency_data"]:
+                    if "grna_sequence" in item and item["grna_sequence"]:
+                        grna_sequences.append(item["grna_sequence"])
+            
+            # If no sequences found, try extracting from experiment metadata
+            if not grna_sequences and "experiment" in experiment_data:
+                if "gRNA_sequence" in experiment_data["experiment"] and experiment_data["experiment"]["gRNA_sequence"]:
+                    grna_sequences.append(experiment_data["experiment"]["gRNA_sequence"])
+            
+            # If still no sequences, use sequences from raw data if available
+            if not grna_sequences and "raw_data" in experiment_data:
+                raw_df = pd.DataFrame(experiment_data["raw_data"])
+                if "grna_sequence" in raw_df.columns:
+                    grna_sequences.extend(raw_df["grna_sequence"].dropna().unique().tolist())
+                elif "gRNA_sequence" in raw_df.columns:
+                    grna_sequences.extend(raw_df["gRNA_sequence"].dropna().unique().tolist())
+            
+            if not grna_sequences:
+                st.warning("No gRNA sequences found in the experiment data.")
+                return {}
+            
+            # Make predictions using the model
+            predicted_efficiency = model.predict_efficiency(grna_sequences)
+            predicted_offtargets = model.predict_offtargets(grna_sequences)
+            
+            # Combine predictions
+            predictions = []
+            for i, seq in enumerate(grna_sequences):
+                predictions.append({
+                    "grna_sequence": seq,
+                    "predicted_efficiency": float(predicted_efficiency[i]) if i < len(predicted_efficiency) else 0,
+                    "predicted_offtarget": float(predicted_offtargets[i]) if i < len(predicted_offtargets) else 0,
+                    "gc_content": gc_fraction(seq)  # Use gc_fraction instead of GC
+                })
+            
+            # Rest of the method remains the same...
+            
+            return results
+            
+        except Exception as e:
+            st.error(f"Error integrating with CRISPR model: {str(e)}")
+            return {}
