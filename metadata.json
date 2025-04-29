@@ -1,0 +1,21 @@
+{
+  "institution_id": "institution_0",
+  "num_samples": 100,
+  "num_features": 10,
+  "num_classes": 2,
+  "shared_features": [
+    "feature_0",
+    "feature_1",
+    "feature_2",
+    "feature_3",
+    "feature_4",
+    "feature_5",
+    "feature_6"
+  ],
+  "private_features": [
+    "feature_7",
+    "feature_8",
+    "feature_9"
+  ],
+  "distribution_shift": 0.15734867759634297
+}

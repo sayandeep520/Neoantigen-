@@ -1,0 +1,10 @@
+{
+  "update_id": "institution_2_0_20250328074245",
+  "institution_id": "institution_2",
+  "round": 0,
+  "timestamp": "2025-03-28T07:42:45.000437",
+  "model_type": "random_forest",
+  "parameters": [
+    "feature_importances"
+  ]
+}

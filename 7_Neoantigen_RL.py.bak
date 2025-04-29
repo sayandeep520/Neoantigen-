@@ -1,0 +1,1059 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import json
+import time
+import random
+from datetime import datetime
+
+# Import custom modules
+from models.neoantigen_rl import NeoantigenRLTrainer, NeoantigenEnvironment, SimpleQLearningAgent
+from models.neoantigen_model import NeoantiGenAI
+from utils.neoantigen_rl_utils import (
+    get_initial_mutations_from_data,
+    prepare_training_configuration,
+    train_neoantigen_rl_model,
+    create_training_visualizations,
+    format_mutation_for_display,
+    get_neoantigen_suggestions,
+    mhc_binding_prediction,
+    immunogenicity_prediction
+)
+from utils.advanced_rl_visualization import (
+    create_detailed_visualizations,
+    plot_feature_importance,
+    plot_exploitation_vs_exploration,
+    plot_to_base64
+)
+from utils.gemini_integration import GeminiIntegration
+from models.advanced_neoantigen_rl import AdvancedNeoantigenRLTrainer
+
+# Set page configuration
+st.set_page_config(
+    page_title="Neoantigen Reinforcement Learning",
+    page_icon="🧠",
+    layout="wide"
+)
+
+def get_session_state_var(key, default_value=None):
+    """Get variable from session state, initializing it if needed"""
+    if key not in st.session_state:
+        st.session_state[key] = default_value
+    return st.session_state[key]
+
+def main():
+    # Set up session state
+    if 'neoantigen_rl_initial_mutations' not in st.session_state:
+        st.session_state.neoantigen_rl_initial_mutations = []
+    
+    if 'neoantigen_rl_trainer' not in st.session_state:
+        st.session_state.neoantigen_rl_trainer = None
+    
+    if 'neoantigen_rl_results' not in st.session_state:
+        st.session_state.neoantigen_rl_results = None
+    
+    if 'neoantigen_rl_suggestions' not in st.session_state:
+        st.session_state.neoantigen_rl_suggestions = []
+    
+    if 'neoantigen_rl_visualizations' not in st.session_state:
+        st.session_state.neoantigen_rl_visualizations = {}
+        
+    if 'neoantigen_rl_advanced_visualizations' not in st.session_state:
+        st.session_state.neoantigen_rl_advanced_visualizations = {}
+    
+    # Page title
+    st.title("🧠 Neoantigen Reinforcement Learning")
+    
+    # Introduction
+    st.markdown("""
+    ## Reinforcement Learning for Neoantigen Prediction
+    
+    This module uses reinforcement learning to optimize candidate neoantigens for 
+    cancer immunotherapy. The AI agent explores a space of potential mutations, 
+    learns which characteristics lead to effective neoantigens, and suggests 
+    optimal candidates.
+    
+    Key features:
+    - Exploration of the mutation space using reinforcement learning
+    - Automated optimization of MHC binding and immunogenicity
+    - Integration with experimental data
+    - Prediction of effective neoantigens for personalized cancer vaccines
+    """)
+    
+    # Create tabs
+    tabs = st.tabs([
+        "Data Input",
+        "RL Configuration",
+        "Training",
+        "Results & Visualization",
+        "Neoantigen Suggestions"
+    ])
+    
+    # ===== TAB 1: DATA INPUT =====
+    with tabs[0]:
+        st.header("Mutation Data Input")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("Source Selection")
+            data_source = st.selectbox(
+                "Select data source",
+                ["Upload CSV/Excel file", "Use TCGA mutations", "Use synthetic data"],
+                help="Choose where to get the initial mutations for RL training"
+            )
+            
+            if data_source == "Upload CSV/Excel file":
+                uploaded_file = st.file_uploader(
+                    "Upload mutation data file",
+                    type=["csv", "xlsx", "xls"],
+                    help="File must contain at least gene names and protein changes"
+                )
+                
+                if uploaded_file is not None:
+                    try:
+                        if uploaded_file.name.endswith('.csv'):
+                            df = pd.read_csv(uploaded_file)
+                        else:
+                            df = pd.read_excel(uploaded_file)
+                        
+                        st.success(f"Successfully loaded file with {len(df)} rows")
+                        
+                        # Show preview of data
+                        st.subheader("Data Preview")
+                        st.dataframe(df.head())
+                        
+                        # Extract mutations
+                        initial_mutations = get_initial_mutations_from_data(df)
+                        if initial_mutations:
+                            st.session_state.neoantigen_rl_initial_mutations = initial_mutations
+                            st.success(f"Extracted {len(initial_mutations)} mutations for RL training")
+                        else:
+                            st.error("Could not extract mutations from the file. Ensure it has gene and protein change columns.")
+                    
+                    except Exception as e:
+                        st.error(f"Error processing file: {str(e)}")
+            
+            elif data_source == "Use TCGA mutations":
+                # Check if TCGA data is available in session state
+                if 'datasets' in st.session_state and 'tcga' in st.session_state['datasets']:
+                    tcga_data = st.session_state['datasets']['tcga']
+                    st.success(f"Found TCGA mutation data with {len(tcga_data)} mutations")
+                    
+                    # Show preview
+                    st.subheader("TCGA Data Preview")
+                    st.dataframe(tcga_data.head())
+                    
+                    if st.button("Use TCGA Data for RL"):
+                        initial_mutations = get_initial_mutations_from_data(tcga_data)
+                        if initial_mutations:
+                            st.session_state.neoantigen_rl_initial_mutations = initial_mutations
+                            st.success(f"Extracted {len(initial_mutations)} mutations for RL training")
+                        else:
+                            st.error("Could not extract mutations from TCGA data")
+                
+                else:
+                    st.warning("TCGA mutation data not available. Please go to the Data Collection page and fetch TCGA data first.")
+            
+            elif data_source == "Use synthetic data":
+                st.markdown("""
+                Using synthetic mutation data for demonstration purposes.
+                
+                This includes common mutations in cancer genes like KRAS, TP53, BRCA1, and EGFR.
+                """)
+                
+                if st.button("Generate Synthetic Data"):
+                    # Generate synthetic mutations
+                    synthetic_mutations = [
+                        {
+                            'gene': 'KRAS',
+                            'protein_change': 'G12D',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'KRAS',
+                            'protein_change': 'G12V',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'KRAS',
+                            'protein_change': 'G13D',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'TP53',
+                            'protein_change': 'R273H',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'TP53',
+                            'protein_change': 'R175H',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'BRCA1',
+                            'protein_change': 'E1449K',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'BRCA1',
+                            'protein_change': 'C61G',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'EGFR',
+                            'protein_change': 'T790M',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'EGFR',
+                            'protein_change': 'L858R',
+                            'mutation_type': 'missense'
+                        },
+                        {
+                            'gene': 'BRAF',
+                            'protein_change': 'V600E',
+                            'mutation_type': 'missense'
+                        }
+                    ]
+                    
+                    st.session_state.neoantigen_rl_initial_mutations = synthetic_mutations
+                    st.success(f"Generated {len(synthetic_mutations)} synthetic mutations for RL training")
+        
+        with col2:
+            st.subheader("Selected Mutations")
+            
+            if st.session_state.neoantigen_rl_initial_mutations:
+                # Display selected mutations
+                mutations_df = pd.DataFrame(st.session_state.neoantigen_rl_initial_mutations)
+                st.dataframe(mutations_df, height=300)
+                
+                # Option to edit mutations
+                if st.button("Clear Selected Mutations"):
+                    st.session_state.neoantigen_rl_initial_mutations = []
+                    st.success("Cleared all mutations")
+                    st.rerun()
+            else:
+                st.info("No mutations selected yet. Please choose a data source.")
+    
+    # ===== TAB 2: RL CONFIGURATION =====
+    with tabs[1]:
+        st.header("Reinforcement Learning Configuration")
+        
+        # Check if mutations are available
+        if not st.session_state.neoantigen_rl_initial_mutations:
+            st.warning("Please select mutations in the Data Input tab first")
+        else:
+            # Model selection
+            model_type = st.radio(
+                "Select RL Model Type",
+                ["Basic Q-Learning", "Advanced RL Model"],
+                index=0,
+                help="Basic uses simple tabular Q-learning, Advanced uses enhanced RL algorithms with more sophisticated features"
+            )
+            
+            use_advanced_model = model_type == "Advanced RL Model"
+            
+            with st.form("rl_config_form"):
+                st.subheader("Training Parameters")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    num_episodes = st.slider(
+                        "Number of Training Episodes",
+                        min_value=50,
+                        max_value=1000,
+                        value=200,
+                        step=50,
+                        help="More episodes means more training, but takes longer"
+                    )
+                    
+                    epsilon_start = st.slider(
+                        "Initial Exploration Rate (Epsilon)",
+                        min_value=0.1,
+                        max_value=1.0,
+                        value=0.9,
+                        step=0.1,
+                        help="Higher values mean more initial exploration"
+                    )
+                    
+                    epsilon_decay = st.slider(
+                        "Exploration Decay Rate",
+                        min_value=0.90,
+                        max_value=0.99,
+                        value=0.97,
+                        step=0.01,
+                        help="How quickly to reduce exploration"
+                    )
+                
+                with col2:
+                    # Advanced parameters
+                    st.markdown("### Advanced Parameters")
+                    
+                    if not use_advanced_model:
+                        # Basic RL parameters
+                        state_dim = st.number_input(
+                            "State Dimension",
+                            min_value=1,
+                            max_value=10,
+                            value=3,
+                            help="Dimension of state representation"
+                        )
+                        
+                        action_dim = st.number_input(
+                            "Action Dimension",
+                            min_value=1,
+                            max_value=10,
+                            value=3,
+                            help="Number of possible actions"
+                        )
+                    else:
+                        # Advanced RL parameters
+                        feature_size = st.number_input(
+                            "Feature Size",
+                            min_value=10,
+                            max_value=50,
+                            value=30,
+                            help="Size of feature representation in advanced model"
+                        )
+                        
+                        action_dim = st.number_input(
+                            "Action Dimension",
+                            min_value=1,
+                            max_value=10,
+                            value=5,
+                            help="Number of possible actions"
+                        )
+                        
+                        # Additional advanced options
+                        double_q = st.checkbox(
+                            "Use Double Q-Learning",
+                            value=True,
+                            help="More stable learning by using separate target network"
+                        )
+                        
+                        exploration_strategy = st.selectbox(
+                            "Exploration Strategy",
+                            ["epsilon_greedy", "ucb", "softmax"],
+                            index=0,
+                            help="Strategy for exploring the action space"
+                        )
+                    
+                    epsilon_end = st.slider(
+                        "Minimum Exploration Rate",
+                        min_value=0.01,
+                        max_value=0.2,
+                        value=0.01,
+                        step=0.01,
+                        help="Exploration rate at the end of training"
+                    )
+                
+                # Run description and save options
+                st.markdown("### Run Description and Storage")
+                run_description = st.text_input(
+                    "Run Description",
+                    value="Neoantigen RL training run",
+                    help="Description of this training run"
+                )
+                
+                save_model = st.checkbox(
+                    "Save Model After Training",
+                    value=True,
+                    help="Save the trained model for later use"
+                )
+                
+                if save_model:
+                    save_dir = "data/neoantigen_rl/models"
+                else:
+                    save_dir = None
+                
+                # Submit button
+                submit_button = st.form_submit_button("Save Configuration")
+                
+                if submit_button:
+                    # Create configuration dictionary
+                    if not use_advanced_model:
+                        config = {
+                            'state_dim': int(state_dim),
+                            'action_dim': int(action_dim),
+                            'num_episodes': int(num_episodes),
+                            'epsilon_start': float(epsilon_start),
+                            'epsilon_end': float(epsilon_end),
+                            'epsilon_decay': float(epsilon_decay),
+                            'save_dir': save_dir,
+                            'description': run_description,
+                            'run_id': f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                            'use_advanced_model': False
+                        }
+                    else:
+                        config = {
+                            'feature_size': int(feature_size),
+                            'action_dim': int(action_dim),
+                            'num_episodes': int(num_episodes),
+                            'epsilon_start': float(epsilon_start),
+                            'epsilon_end': float(epsilon_end),
+                            'epsilon_decay': float(epsilon_decay),
+                            'save_dir': save_dir,
+                            'description': run_description,
+                            'run_id': f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                            'double_q': bool(double_q),
+                            'exploration_strategy': exploration_strategy,
+                            'use_advanced_model': True
+                        }
+                    
+                    # Store in session state
+                    st.session_state.neoantigen_rl_config = config
+                    st.success("Configuration saved!")
+            
+            # Display current configuration
+            if hasattr(st.session_state, 'neoantigen_rl_config'):
+                st.subheader("Current Configuration")
+                st.json(st.session_state.neoantigen_rl_config)
+    
+    # ===== TAB 3: TRAINING =====
+    with tabs[2]:
+        st.header("Reinforcement Learning Training")
+        
+        # Check prerequisites
+        if not st.session_state.neoantigen_rl_initial_mutations:
+            st.warning("Please select mutations in the Data Input tab first")
+        elif not hasattr(st.session_state, 'neoantigen_rl_config'):
+            st.warning("Please configure training parameters in the RL Configuration tab")
+        else:
+            st.subheader("Training Control")
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                # Training status display
+                status_container = st.empty()
+                progress_bar = st.empty()
+                metrics_container = st.empty()
+                
+                # Initialize metrics
+                current_episode = 0
+                current_reward = 0.0
+                current_epsilon = st.session_state.neoantigen_rl_config['epsilon_start']
+                
+                def update_progress(progress, episode, reward, epsilon):
+                    nonlocal current_episode, current_reward, current_epsilon
+                    
+                    # Update metrics
+                    current_episode = episode
+                    current_reward = reward
+                    current_epsilon = epsilon
+                    
+                    # Update UI
+                    progress_bar.progress(progress)
+                    status_container.text(f"Training in progress: Episode {episode+1}/{st.session_state.neoantigen_rl_config['num_episodes']}")
+                    
+                    # Update metrics
+                    with metrics_container.container():
+                        metric_col1, metric_col2, metric_col3 = st.columns(3)
+                        metric_col1.metric("Current Episode", f"{episode+1}")
+                        metric_col2.metric("Current Reward", f"{reward:.2f}")
+                        metric_col3.metric("Exploration Rate", f"{epsilon:.4f}")
+                
+                # Training button
+                if st.button("Start RL Training"):
+                    # Get mutations and config
+                    initial_mutations = st.session_state.neoantigen_rl_initial_mutations
+                    config = st.session_state.neoantigen_rl_config
+                    
+                    # Set initial status
+                    status_container.text("Initializing RL training...")
+                    progress_bar.progress(0)
+                    
+                    # Train model
+                    try:
+                        rl_trainer, results = train_neoantigen_rl_model(
+                            initial_mutations, 
+                            config,
+                            progress_callback=update_progress,
+                            use_advanced_model=config.get('use_advanced_model', False)
+                        )
+                        
+                        # Store in session state
+                        st.session_state.neoantigen_rl_trainer = rl_trainer
+                        st.session_state.neoantigen_rl_results = results
+                        
+                        # Create visualizations
+                        visualizations = create_training_visualizations(results)
+                        st.session_state.neoantigen_rl_visualizations = visualizations
+                        
+                        # Generate suggestions
+                        suggestions = get_neoantigen_suggestions(rl_trainer)
+                        st.session_state.neoantigen_rl_suggestions = suggestions
+                        
+                        # Update status
+                        status_container.success("Training completed successfully!")
+                        
+                        # Force refresh to show results
+                        st.rerun()
+                    
+                    except Exception as e:
+                        status_container.error(f"Error during training: {str(e)}")
+            
+            with col2:
+                st.markdown("### Training Information")
+                
+                st.markdown("""
+                **What happens during training:**
+                
+                1. The RL agent explores the mutation space
+                2. It learns which mutations lead to effective neoantigens
+                3. The exploration rate decreases over time
+                4. The agent converges toward optimal candidates
+                
+                Training may take a few minutes depending on the number of episodes.
+                """)
+    
+    # ===== TAB 4: RESULTS & VISUALIZATION =====
+    with tabs[3]:
+        st.header("Training Results and Visualization")
+        
+        # Check if we have results
+        if not st.session_state.neoantigen_rl_results:
+            st.info("No training results available yet. Please run training first.")
+        else:
+            results = st.session_state.neoantigen_rl_results
+            visualizations = st.session_state.neoantigen_rl_visualizations
+            
+            # Show training summary
+            st.subheader("Training Summary")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric(
+                    "Total Episodes", 
+                    len(results['rewards'])
+                )
+            
+            with col2:
+                st.metric(
+                    "Best Reward", 
+                    f"{max(results['rewards']):.2f}" if results['rewards'] else "N/A"
+                )
+            
+            with col3:
+                st.metric(
+                    "Final Exploration Rate", 
+                    f"{results['config']['epsilon_end']:.4f}"
+                )
+            
+            # Display visualizations
+            st.subheader("Training Visualizations")
+            
+            # Create advanced visualizations if we're using the advanced model
+            advanced_visualizations = {}
+            if isinstance(st.session_state.neoantigen_rl_trainer, AdvancedNeoantigenRLTrainer):
+                # Create detailed advanced visualizations
+                advanced_visualizations = create_detailed_visualizations(
+                    st.session_state.neoantigen_rl_trainer, 
+                    results
+                )
+                
+                # Add feature importance and exploration-exploitation plots
+                feature_importance_fig = plot_feature_importance(st.session_state.neoantigen_rl_trainer)
+                if feature_importance_fig:
+                    advanced_visualizations['feature_importance'] = feature_importance_fig
+                
+                exploitation_exploration_fig = plot_exploitation_vs_exploration(st.session_state.neoantigen_rl_trainer, results)
+                if exploitation_exploration_fig:
+                    advanced_visualizations['exploitation_exploration'] = exploitation_exploration_fig
+                
+                # Add advanced visualizations to Streamlit session
+                st.session_state.neoantigen_rl_advanced_visualizations = advanced_visualizations
+            
+            # Define tabs based on available visualizations
+            tab_titles = ["Learning Curve", "Reward Distribution", "Top Performers"]
+            
+            # Add advanced tabs if available
+            if advanced_visualizations:
+                advanced_tabs = []
+                if 'learning_curve_detailed' in advanced_visualizations:
+                    advanced_tabs.append("Advanced Learning Curve")
+                if 'action_importance' in advanced_visualizations:
+                    advanced_tabs.append("Action Importance")
+                if 'uncertainty_distribution' in advanced_visualizations:
+                    advanced_tabs.append("Uncertainty Analysis")
+                if 'exploration_analysis' in advanced_visualizations:
+                    advanced_tabs.append("Exploration Strategy")
+                if 'temperature_decay' in advanced_visualizations:
+                    advanced_tabs.append("Temperature Decay")
+                if 'best_candidate' in advanced_visualizations:
+                    advanced_tabs.append("Best Candidate")
+                if 'feature_importance' in advanced_visualizations:
+                    advanced_tabs.append("Feature Importance")
+                if 'exploitation_exploration' in advanced_visualizations:
+                    advanced_tabs.append("Exploration vs Exploitation")
+                
+                tab_titles.extend(advanced_tabs)
+            
+            # Create visualization tabs
+            visualization_tabs = st.tabs(tab_titles)
+            
+            # Basic visualizations
+            with visualization_tabs[0]:
+                if 'learning_curve' in visualizations:
+                    st.pyplot(visualizations['learning_curve'])
+                else:
+                    st.info("Learning curve visualization not available")
+            
+            with visualization_tabs[1]:
+                if 'reward_distribution' in visualizations:
+                    st.pyplot(visualizations['reward_distribution'])
+                else:
+                    st.info("Reward distribution visualization not available")
+            
+            with visualization_tabs[2]:
+                if 'top_rewards' in visualizations:
+                    st.pyplot(visualizations['top_rewards'])
+                else:
+                    st.info("Top performers visualization not available")
+            
+            # Add advanced visualization tabs if available
+            tab_index = 3
+            if advanced_visualizations:
+                # Advanced Learning Curve
+                if 'learning_curve_detailed' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['learning_curve_detailed'])
+                        st.markdown("""
+                        **Advanced Learning Curve with Exploration Rate**
+                        
+                        This visualization shows how the reward improves over training episodes (blue)
+                        alongside the exploration rate (red) which decreases over time. This helps
+                        understand the exploration-exploitation trade-off.
+                        """)
+                    tab_index += 1
+                
+                # Action Importance
+                if 'action_importance' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['action_importance'])
+                        st.markdown("""
+                        **Action Importance Analysis**
+                        
+                        This chart shows which actions the RL agent relied on most during training.
+                        Higher percentages indicate actions that were more frequently chosen to
+                        optimize neoantigen candidates.
+                        """)
+                    tab_index += 1
+                
+                # Uncertainty Distribution
+                if 'uncertainty_distribution' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['uncertainty_distribution'])
+                        st.markdown("""
+                        **Uncertainty Distribution**
+                        
+                        This histogram shows the distribution of uncertainty in the model's predictions.
+                        Lower uncertainty values indicate more confidence in the predicted rewards for
+                        particular states.
+                        """)
+                    tab_index += 1
+                
+                # Exploration Strategy
+                if 'exploration_analysis' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['exploration_analysis'])
+                        st.markdown("""
+                        **Exploration Strategy Analysis**
+                        
+                        This visualization shows how the training progressed through three phases:
+                        early training (red), mid training (green), and late training (blue).
+                        The pattern reveals how the chosen exploration strategy impacted learning.
+                        """)
+                    tab_index += 1
+                
+                # Temperature Decay
+                if 'temperature_decay' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['temperature_decay'])
+                        st.markdown("""
+                        **Temperature Decay for Softmax Exploration**
+                        
+                        When using softmax exploration, this chart shows how the temperature parameter
+                        decreased over time. Lower temperature means more exploitation of the best actions
+                        and less random exploration.
+                        """)
+                    tab_index += 1
+                
+                # Best Candidate
+                if 'best_candidate' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['best_candidate'])
+                        st.markdown("""
+                        **Best Neoantigen Candidate Details**
+                        
+                        This visualization summarizes the properties of the top neoantigen candidate
+                        discovered during reinforcement learning training.
+                        """)
+                    tab_index += 1
+                
+                # Feature Importance
+                if 'feature_importance' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['feature_importance'])
+                        st.markdown("""
+                        **Feature Importance in Neoantigen Selection**
+                        
+                        This chart shows the relative importance of different features used to
+                        represent neoantigens in the reinforcement learning model.
+                        """)
+                    tab_index += 1
+                
+                # Exploration vs Exploitation
+                if 'exploitation_exploration' in advanced_visualizations and tab_index < len(visualization_tabs):
+                    with visualization_tabs[tab_index]:
+                        st.pyplot(advanced_visualizations['exploitation_exploration'])
+                        st.markdown("""
+                        **Exploration vs. Exploitation Balance**
+                        
+                        This visualization shows how the reinforcement learning algorithm balanced
+                        exploration (trying new mutations) with exploitation (focusing on known good mutations).
+                        The red shaded area represents exploration intensity, while the green dashed line
+                        shows exploitation effectiveness.
+                        """)
+                    tab_index += 1
+            
+            # Display best episodes
+            st.subheader("Best Episodes")
+            
+            if 'best_episodes' in results and results['best_episodes']:
+                best_episodes_df = pd.DataFrame([
+                    {
+                        'rank': i+1,
+                        'episode': episode['episode'],
+                        'reward': episode['reward'],
+                        'gene': episode['mutation'].get('gene', 'Unknown'),
+                        'protein_change': episode['mutation'].get('protein_change', 'Unknown'),
+                        'mutation_type': episode['mutation'].get('mutation_type', 'Unknown')
+                    }
+                    for i, episode in enumerate(results['best_episodes'])
+                ])
+                
+                st.dataframe(best_episodes_df, height=200)
+            else:
+                st.info("No best episodes information available")
+            
+            # Option to save results
+            st.subheader("Save Results")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Save Results to File"):
+                    if not os.path.exists("data/neoantigen_rl/results"):
+                        os.makedirs("data/neoantigen_rl/results", exist_ok=True)
+                    
+                    filename = f"neoantigen_rl_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    filepath = os.path.join("data/neoantigen_rl/results", filename)
+                    
+                    # Convert numpy arrays to lists for JSON serialization
+                    serializable_results = json.loads(
+                        json.dumps(results, default=lambda o: o.tolist() if isinstance(o, np.ndarray) else o)
+                    )
+                    
+                    with open(filepath, 'w') as f:
+                        json.dump(serializable_results, f, indent=2)
+                    
+                    st.success(f"Results saved to {filepath}")
+            
+            with col2:
+                # Option to clear results
+                if st.button("Clear Results", key="clear_results"):
+                    st.session_state.neoantigen_rl_results = None
+                    st.session_state.neoantigen_rl_visualizations = {}
+                    st.session_state.neoantigen_rl_advanced_visualizations = {}
+                    st.session_state.neoantigen_rl_trainer = None
+                    st.session_state.neoantigen_rl_suggestions = []
+                    st.success("Results cleared")
+                    st.rerun()
+    
+    # ===== TAB 5: NEOANTIGEN SUGGESTIONS =====
+    with tabs[4]:
+        st.header("Neoantigen Suggestions for Immunotherapy")
+        
+        if not st.session_state.neoantigen_rl_suggestions:
+            st.info("No neoantigen suggestions available yet. Please run training first.")
+        else:
+            suggestions = st.session_state.neoantigen_rl_suggestions
+            
+            # Display suggestions
+            st.subheader("Top Neoantigen Candidates")
+            
+            # Create DataFrame for display
+            suggestions_df = pd.DataFrame([
+                {
+                    'rank': i+1,
+                    'gene': suggestion.get('gene', 'Unknown'),
+                    'protein_change': suggestion.get('protein_change', 'Unknown'),
+                    'mutation_type': suggestion.get('mutation_type', 'Unknown'),
+                    'reward': suggestion.get('reward', 0)
+                }
+                for i, suggestion in enumerate(suggestions)
+            ])
+            
+            st.dataframe(suggestions_df, height=250)
+            
+            # Detailed view of selected neoantigen
+            st.subheader("Detailed Analysis")
+            
+            selected_rank = st.selectbox(
+                "Select neoantigen to analyze",
+                options=suggestions_df['rank'].tolist(),
+                format_func=lambda x: f"#{x}: {suggestions_df[suggestions_df['rank']==x]['gene'].iloc[0]} {suggestions_df[suggestions_df['rank']==x]['protein_change'].iloc[0]}"
+            )
+            
+            # Get selected suggestion
+            selected_suggestion = suggestions[selected_rank-1]
+            
+            # Create tabs for different types of analysis
+            analysis_tabs = st.tabs(["Basic Analysis", "AI-Powered Optimization"])
+            
+            # Tab 1: Basic Analysis
+            with analysis_tabs[0]:
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    st.markdown("### Neoantigen Properties")
+                    
+                    st.markdown(f"""
+                    **Gene:** {selected_suggestion.get('gene', 'Unknown')}
+                    
+                    **Protein Change:** {selected_suggestion.get('protein_change', 'Unknown')}
+                    
+                    **Mutation Type:** {selected_suggestion.get('mutation_type', 'Unknown')}
+                    
+                    **Reward Score:** {selected_suggestion.get('reward', 0):.4f}
+                    """)
+                    
+                    # MHC binding prediction
+                    st.markdown("### MHC Binding Prediction")
+                    
+                    hla_alleles = ['HLA-A*02:01', 'HLA-B*07:02', 'HLA-A*01:01', 'HLA-B*08:01']
+                    selected_hla = st.selectbox("Select HLA allele", hla_alleles)
+                    
+                    # In a real implementation, this would call the neoantigen model
+                    # But here we'll simulate results since we're focusing on the RL part
+                    if st.button("Predict MHC Binding"):
+                        with st.spinner("Running prediction..."):
+                            # Add a short delay to simulate processing
+                            time.sleep(1)
+                            
+                            # Generate simulated results
+                            peptide = "YLDLRPETL"  # This would be derived from the actual mutation
+                            binding_affinity = random.uniform(10, 300)  # Lower is better
+                            percentile_rank = random.uniform(0.1, 5.0)  # Lower is better
+                            
+                            # Display results
+                            st.markdown(f"""
+                            **Peptide Sequence:** {peptide}
+                            
+                            **MHC Binding Affinity:** {binding_affinity:.1f} nM
+                            
+                            **Percentile Rank:** {percentile_rank:.2f}%
+                            
+                            **Binding Level:** {"Strong binder" if binding_affinity < 50 else "Weak binder" if binding_affinity < 250 else "Non-binder"}
+                            """)
+                
+                with col2:
+                    st.markdown("### Immunogenicity Analysis")
+                    
+                    # Radar chart for immunogenicity factors
+                    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+                    
+                    # Simulated immunogenicity factors
+                    categories = ['MHC Binding', 'TCR Recognition', 'Proteasomal Cleavage', 'TAP Transport', 'Uniqueness']
+                    values = [random.uniform(0.5, 1.0) for _ in categories]
+                    
+                    # Number of variables
+                    N = len(categories)
+                    
+                    # We need to repeat the first value to close the loop
+                    values += values[:1]
+                    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+                    angles += angles[:1]
+                    
+                    # Draw the plot
+                    ax.plot(angles, values, linewidth=2, linestyle='solid')
+                    ax.fill(angles, values, alpha=0.25)
+                    
+                    # Set category labels
+                    ax.set_xticks(angles[:-1])
+                    ax.set_xticklabels(categories)
+                    
+                    # Remove radial labels and set y-limits
+                    ax.set_yticklabels([])
+                    ax.set_ylim(0, 1)
+                    
+                    st.pyplot(fig)
+                    
+                    # Immunogenicity score
+                    st.markdown("### Overall Scores")
+                    
+                    score_col1, score_col2 = st.columns(2)
+                    with score_col1:
+                        st.metric("Immunogenicity", f"{random.uniform(0.6, 0.9):.2f}")
+                    with score_col2:
+                        st.metric("Cancer Specificity", f"{random.uniform(0.5, 0.95):.2f}")
+                    
+                    # Patient HLA compatibility
+                    st.markdown("### Patient HLA Compatibility")
+                    
+                    compatibility_data = {
+                        'HLA Allele': ['HLA-A*02:01', 'HLA-A*01:01', 'HLA-B*07:02', 'HLA-B*08:01'],
+                        'Binding Level': ['Strong', 'Weak', 'Moderate', 'No binding'],
+                        'IC50 (nM)': [35.2, 157.8, 89.4, 412.6]
+                    }
+                    
+                    st.dataframe(pd.DataFrame(compatibility_data))
+            
+            # Tab 2: AI-Powered Optimization with Gemini
+            with analysis_tabs[1]:
+                st.subheader("AI-Powered Neoantigen Optimization")
+                
+                # Check for Gemini API key
+                gemini_api_key = os.environ.get("GEMINI_API_KEY")
+                
+                if not gemini_api_key:
+                    st.info("💡 **AI-powered optimization requires a Google Gemini API key.** This enables advanced analysis of neoantigens using Google's Gemini AI model.")
+                    
+                    # Option to add API key
+                    api_key_input = st.text_input(
+                        "Enter Google Gemini API Key",
+                        type="password",
+                        help="Your Google Gemini API key for accessing AI models"
+                    )
+                    
+                    if api_key_input and st.button("Save API Key", key="save_api_key_neo"):
+                        # For this demo, we'll just use it for the current session
+                        os.environ["GEMINI_API_KEY"] = api_key_input
+                        st.success("API key saved for this session.")
+                        st.rerun()  # Refresh to show AI analysis
+                
+                # Show AI analysis if we have an API key
+                if gemini_api_key:
+                    # Initialize Gemini integration
+                    gemini = GeminiIntegration(api_key=os.environ.get("GEMINI_API_KEY"))
+                    
+                    if gemini.is_available():
+                        # Check if analysis is already in session state
+                        optimization_key = f"gemini_neoantigen_{selected_suggestion.get('gene', '')}_{selected_suggestion.get('protein_change', '')}"
+                        
+                        # Clinical context for analysis
+                        clinical_context = {
+                            "cancer_type": "solid tumor",
+                            "patient_hla": ["HLA-A*02:01", "HLA-B*07:02"],  # Example HLA types
+                            "prior_treatments": ["chemotherapy"]
+                        }
+                        
+                        if optimization_key not in st.session_state:
+                            if st.button("Optimize Neoantigen with AI"):
+                                with st.spinner("Analyzing and optimizing neoantigen with Google's Gemini model..."):
+                                    # Run optimization
+                                    optimization_result = gemini.optimize_neoantigen(
+                                        selected_suggestion,
+                                        clinical_context=clinical_context
+                                    )
+                                    # Store in session state
+                                    st.session_state[optimization_key] = optimization_result
+                                    st.rerun()  # Refresh to show results
+                        else:
+                            # Use cached optimization results
+                            optimization_result = st.session_state[optimization_key]
+                            
+                            # Display optimization results
+                            if "error" in optimization_result:
+                                st.error(f"API Error: {optimization_result['message']}")
+                            else:
+                                # Display optimized mutation
+                                if 'optimized_mutation' in optimization_result:
+                                    st.subheader("Optimized Neoantigen")
+                                    opt_mutation = optimization_result['optimized_mutation']
+                                    
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        st.markdown("### Original vs. Optimized")
+                                        
+                                        comparison_data = pd.DataFrame([
+                                            {
+                                                'Property': 'Gene',
+                                                'Original': selected_suggestion.get('gene', ''),
+                                                'Optimized': opt_mutation.get('gene', '')
+                                            },
+                                            {
+                                                'Property': 'Protein Change',
+                                                'Original': selected_suggestion.get('protein_change', ''),
+                                                'Optimized': opt_mutation.get('protein_change', '')
+                                            },
+                                            {
+                                                'Property': 'Mutation Type',
+                                                'Original': selected_suggestion.get('mutation_type', ''),
+                                                'Optimized': opt_mutation.get('mutation_type', '')
+                                            }
+                                        ])
+                                        
+                                        st.dataframe(comparison_data)
+                                    
+                                    with col2:
+                                        # Display scores
+                                        st.markdown("### Predicted Improvement")
+                                        
+                                        score_col1, score_col2, score_col3 = st.columns(3)
+                                        
+                                        with score_col1:
+                                            mhc_binding = optimization_result.get('mhc_binding_prediction', 0.0)
+                                            st.metric("MHC Binding", f"{mhc_binding:.2f}")
+                                        
+                                        with score_col2:
+                                            immunogenicity = optimization_result.get('immunogenicity_score', 0.0)
+                                            st.metric("Immunogenicity", f"{immunogenicity:.2f}")
+                                        
+                                        with score_col3:
+                                            stability = optimization_result.get('stability_score', 0.0)
+                                            st.metric("Stability", f"{stability:.2f}")
+                                
+                                # Display modification details
+                                if 'modifications' in optimization_result and optimization_result['modifications']:
+                                    st.subheader("Recommended Modifications")
+                                    mods_df = pd.DataFrame(optimization_result['modifications'])
+                                    st.dataframe(mods_df)
+                                
+                                # Display clinical recommendations
+                                if 'clinical_recommendations' in optimization_result and optimization_result['clinical_recommendations']:
+                                    st.subheader("Clinical Recommendations")
+                                    for rec in optimization_result['clinical_recommendations']:
+                                        st.markdown(f"- {rec}")
+                                
+                                # Button to apply optimization
+                                if 'optimized_mutation' in optimization_result:
+                                    if st.button("Apply Optimization to RL Model"):
+                                        # Here we would update the mutation in the RL model
+                                        st.success("Optimization applied. This would update the RL model in a full implementation.")
+                    else:
+                        st.error("Failed to initialize Gemini integration. Please check your API key and try again.")
+            
+            # Export options
+            st.subheader("Export Options")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Export All Suggestions as CSV"):
+                    # This would download in a real app
+                    st.success("Suggestions exported successfully")
+            
+            with col2:
+                if st.button("Send to Neoantigen Synthesis"):
+                    st.success("Selected candidates sent to synthesis module")
+
+if __name__ == "__main__":
+    main()
